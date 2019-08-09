@@ -7,8 +7,12 @@ d = "giving the original memoryqa dataset, will generate a *_data.p, *_shared.p 
 import os,sys,json,re
 import argparse,nltk
 import numpy as np
+
+import pickle
+import random
 from collections import Counter
-import cPickle as pickle
+import itertools
+from itertools import takewhile
 
 def get_args():
 	parser = argparse.ArgumentParser(description=d)
@@ -21,6 +25,7 @@ def get_args():
 	parser.add_argument("imgfeat",action="store",type=str,help="/path/to img feat npz file")
 	parser.add_argument("glove",action="store",type=str,help="/path/to glove vector file")
 	parser.add_argument("outpath",type=str,help="output path")
+	parser.add_argument("min_count_word",type=int,default=0,help="min word count for filteration")
 
 	return parser.parse_args()
 
@@ -30,9 +35,10 @@ def mkdir(path):
 		os.makedirs(path)
 
 # ------------------------------------------------ for lbum descript html tag
-from HTMLParser import HTMLParser
+from html.parser import HTMLParser
 class MLStripper(HTMLParser):
 	def __init__(self):
+		super().__init__()
 		self.reset()
 		self.fed = []
 	def handle_data(self, d):
@@ -81,18 +87,65 @@ def get_word2vec(args,word_counter):
 	#print "{}/{} of word vocab have corresponding vectors ".format(len(word2vec_dict), len(word_counter))
 	return word2vec_dict
 
+def extract_vocab(wordCounter, top_k=None, start=0):
+    """ Turns an iterable of list of tokens into a vocabulary.
+        These tokens could be single answers or word tokens in questions.
+    """
+    counter = wordCounter   
+    if top_k:
+        most_common_tokens = counter.most_common(top_k)
+        # print(most_common_tokens)
+        most_common_tokens=list(filter(lambda x: not x[0].isdigit(), most_common_tokens))
+
+        # most_common = (t for t, c in most_common)# will come one first letter
+    else:
+        most_common = counter.most_common()
+        # # descending in count, then lexicographical order
+        # tokens = sorted(most_common_words, key=lambda x: (counter[x], x), reverse=True)# using this not getting good words
+        most_common=list(filter(lambda x: not x[0].isdigit(), most_common))# To remoce digit "22343 , 2"
+        # select only the words appearing at least min_count
+        most_common_tokens = list(takewhile(lambda x: x[1] >= args.min_count_word, most_common)) # this is for word how many number of time occure in the dataset.
+    most_common_tokens = list(filter(lambda x: x[0].isalpha(), most_common_tokens))# this is for "2good -> good, nice3->nice"
+    most_common_tokens = list(filter(lambda x: len(str(x[0])) > 2, most_common_tokens)) # this is for word with number of character > 2
+    # vocab = {t: i for i, t in enumerate(most_common_tokens, start=start)} ## start labels from 1 for question vocabulary. t: will get wors with count
+    vocab = {t[0]: i for i, t in enumerate(most_common_tokens, start=start)} ## start labels from 1 for question vocabulary
+    return vocab
+
 from tqdm import tqdm
 def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 	debug = False
 	sent_tokenize = nltk.sent_tokenize
 	sent_tokenize = lambda para:[para] # right now we don't do sentence tokenization # just for album_description
-	def word_tokenize(tokens):
-		# nltk.word_tokenize will split ()
-		# "a" -> '``' + a + "''"
-		# lizzy's -> lizzy + 's
-		# they're -> they + 're
-		# then we remove and split "-"
-		return process_tokens([token.replace("''", '"').replace("``", '"') for token in nltk.word_tokenize(tokens)])
+
+	# def word_tokenize(tokens):
+	# 	# nltk.word_tokenize will split ()
+	# 	# "a" -> '``' + a + "''"
+	# 	# lizzy's -> lizzy + 's
+	# 	# they're -> they + 're
+	# 	# then we remove and split "-"
+	# 	return process_tokens([token.replace("''", '"').replace("``", '"') for token in nltk.word_tokenize(tokens)])
+
+	def word_tokenize(token):
+		prepared = []
+		# lower case
+		# print('a',tag)
+		token = token.lower()
+		# define desired replacements here
+		punctuation_dict = {'.': ' ', "'": '', '?': ' ', '_': ' ', '-': ' ', '/': ' ', ',': ' ','@': ' ', '$': ' ', '%': ' ', '!': ' ', '#': ' ', '^': ' ',  '*': ' ', '(': ' ', ')': ' ', '^': ' ','~': ' ','{': ' ','}': ' ','[': ' ',']': ' ','+': ' ','=': ' ',}# '\': ' ', '&': ' '}
+		# punctuation_dict = {'.': ' ', "'": '', '?': ' ', '_': ' ', '-': ' ', '/': ' ', ',': ' '}
+		conversational_dict = {"iii": '', "for": '', "from": '', "and": '', "hrc": '',"total": '',"his": '',"its": '',"nxt": '',"aaa": '',
+							   "dti ": ' ', "gra ": ' ', "astm": '', "tnt": '', "vpr": '',"the": '',"this": '',"that": '',"these": '',"then": '',
+							   "njr": '', "xxxs": '',"xxx": '',"xx": '',"sud": '',"xizi": '',"ing": '',"too": '',"was": '',"any": '',"many": ''}
+		rep = punctuation_dict
+		rep.update(conversational_dict)
+		rep = dict((re.escape(k), v) for k, v in rep.items())
+		pattern = re.compile("|".join(rep.keys()))
+		token = pattern.sub(lambda m: rep[re.escape(m.group(0))], token)
+		 # sentence to list
+		token = token.split(' ')
+		# # remove empty strings
+		token = list(filter(None, token))
+		return token	
 
 	qas = {str(qa['question_id']):qa for qa in args.qas}
 
@@ -121,7 +174,7 @@ def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 		# album ids
 		for albumId in qa['album_ids']:
 			albumId = str(albumId)
-			if(not global_aids.has_key(albumId)):
+			if(not albumId in global_aids):
 				global_aids[albumId] = 0
 			global_aids[albumId]+=1 # remember how many times this album is used
 
@@ -149,17 +202,17 @@ def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 					char_counter[ciijk]+=1
 		
 		# for debug
-		if(debug):
-			print "questiion:%s"%qa['question']
-			print qi
-			print cqi
-			print "answer:%s"%(qa['answer'])
-			print yi
-			print cyi
-			print "choices:%s"%("/".join(qa['multiple_choices_4']))
-			print ci
-			print cci
-			break
+		# if(debug):
+		# 	print "questiion:%s"%qa['question']
+		# 	print qi
+		# 	print cqi
+		# 	print "answer:%s"%(qa['answer'])
+		# 	print yi
+		# 	print cyi
+		# 	print "choices:%s"%("/".join(qa['multiple_choices_4']))
+		# 	print ci
+		# 	print cci
+		# 	break
 
 		q.append(qi)
 		cq.append(cqi)
@@ -212,7 +265,7 @@ def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 		assert len(temp['photo_ids']) == len(temp['photo_titles'])
 		for pid in temp['photo_ids']:
 			assert isinstance(pid, str)
-			if(not pid2feat.has_key(pid)):
+			if(not pid in pid2feat):
 				#if(args.imageispca): # pca feature needs not l2norm
 				#	pid2feat[pid] = args.images[pid]
 				#else:
@@ -222,20 +275,20 @@ def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 
 		#assert len(temp['photo_feats']) == len(temp['photo_titles'])
 
-		if(debug):
-			print "album title:%s"%album['album_title']
-			print temp['title']
-			print temp['title_c']
-			print "album description:%s"%album['album_description']
-			print temp['description']
-			print temp['description_c']
-			print "album when:%s,where:%s"%(album['album_when'],album['album_where'])
-			print temp['when'],temp['where']
-			print temp['when_c'],temp['where_c']
-			print "album photo tile 1:%s"%album['photo_titles'][0]
-			print temp['photo_titles'][0]
-			print temp['photo_titles_c'][0]
-			sys.exit()
+		# if(debug):
+		# 	print "album title:%s"%album['album_title']
+		# 	print temp['title']
+		# 	print temp['title_c']
+		# 	print "album description:%s"%album['album_description']
+		# 	print temp['description']
+		# 	print temp['description_c']
+		# 	print "album when:%s,where:%s"%(album['album_when'],album['album_where'])
+		# 	print temp['when'],temp['where']
+		# 	print temp['when_c'],temp['where_c']
+		# 	print "album photo tile 1:%s"%album['photo_titles'][0]
+		# 	print temp['photo_titles'][0]
+		# 	print temp['photo_titles_c'][0]
+		# 	sys.exit()
 
 		#print [tok for title in temp['photo_titles'] for tok in title ]
 		for t in temp['title'] + temp['description'] + temp['where'] + temp['when'] + [tok for title in temp['photo_titles'] for tok in title ]:
@@ -247,6 +300,7 @@ def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 		album_info[albumId] = temp
 
 	word2vec_dict = get_word2vec(args,word_counter)
+	vocab = extract_vocab(word_counter)
 
 	#q,cq,y,cy,aid,qid,cs,ccs,idxs 
 	data = {
@@ -267,9 +321,10 @@ def prepro_each(args,data_type,question_ids,start_ratio=0.0,end_ratio=1.0):
 		"pid2feat":pid2feat, # pid -> image feature
 		"wordCounter":word_counter,
 		"charCounter":char_counter,
-		"word2vec":word2vec_dict
+		"word2vec":word2vec_dict,
+		"vocab":vocab
 	}
-	print "data:%s, char entry:%s, word entry:%s, word2vec entry:%s,album: %s/%s, image_feat:%s"%(data_type,len(char_counter),len(word_counter),len(word2vec_dict),len(album_info),len(albums),len(pid2feat))
+	# print("data:%s, char entry:%s, word entry:%s, word2vec entry:%s,album: %s/%s, image_feat:%s"%(data_type,len(char_counter),len(word_counter),len(word2vec_dict),len(album_info),len(albums),len(pid2feat)))
 
 	pickle.dump(data,open(os.path.join(args.outpath,"%s_data.p"%data_type),"wb"))
 	pickle.dump(shared,open(os.path.join(args.outpath,"%s_shared.p"%data_type),"wb"))
@@ -300,12 +355,11 @@ def getTrainValIds(qas,validlist,testidlist):
 		valIds = trainIds[:valcount]
 		trainIds = trainIds[valcount:]
 
-	print "total trainId:%s,valId:%s,testId:%s, total qa:%s"%(len(trainIds),len(valIds),len(testIds),len(qas))
+	# print "total trainId:%s,valId:%s,testId:%s, total qa:%s"%(len(trainIds),len(valIds),len(testIds),len(qas))
 	return trainIds,valIds,testIds
 
 
-import random
-import cPickle as pickle
+
 if __name__ == "__main__":
 	args = get_args()
 	mkdir(args.outpath)
@@ -317,7 +371,7 @@ if __name__ == "__main__":
 
 	# if the image is a .p file, then we will read it differently
 	if(args.imgfeat.endswith(".p")):
-		print "read pickle image feat."
+		print("read pickle image feat.")
 		imagedata = pickle.load(open(args.imgfeat,"r"))
 		args.images = {}
 		assert len(imagedata[0]) == len(imagedata[1])
@@ -325,7 +379,7 @@ if __name__ == "__main__":
 			args.images[pid] = imagedata[1][i]
 
 	else:
-		print "read npz image feat."
+		print("read npz image feat.")
 		args.images = np.load(args.imgfeat)
 
 
